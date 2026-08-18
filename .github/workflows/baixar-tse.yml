@@ -22,47 +22,63 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq unzip csvkit
+          sudo apt-get install -y -qq unzip
           mkdir -p saida/{cadastro,propostas,fotos,logs}
 
       - name: Baixar cadastro oficial de candidaturas
         run: |
           set -euxo pipefail
-          url="$TSE_CDN/odsele/consulta_cand/consulta_cand_2026_BRASIL.zip"
+          url="$TSE_CDN/odsele/consulta_cand/consulta_cand_2026.zip"
           echo "$url" | tee saida/logs/url_cadastro.txt
           curl -fL --retry 5 --retry-all-errors --connect-timeout 30 "$url" -o /tmp/candidatos.zip
           unzip -q /tmp/candidatos.zip -d saida/cadastro
-          find saida/cadastro -maxdepth 2 -type f -printf '%p\n' | sort > saida/logs/arquivos_cadastro.txt
+          find saida/cadastro -type f -printf '%p\n' | sort > saida/logs/arquivos_cadastro.txt
 
       - name: Montar manifesto de Presidente e Governadores
         run: |
           python3 - <<'PY'
-          import csv, glob, os, json, unicodedata
-          files = glob.glob('saida/cadastro/**/*.csv', recursive=True)
+          import csv, glob, json, unicodedata
+
+          files = sorted(glob.glob('saida/cadastro/**/*.csv', recursive=True))
           if not files:
               raise SystemExit('Nenhum CSV de candidaturas foi encontrado')
-          src = max(files, key=os.path.getsize)
+
           def norm(s):
               s = unicodedata.normalize('NFKD', s or '').encode('ascii','ignore').decode().upper()
               return s.strip()
-          rows=[]
-          with open(src,'r',encoding='latin1',errors='replace',newline='') as f:
-              r=csv.DictReader(f, delimiter=';')
-              for row in r:
-                  cargo=norm(row.get('DS_CARGO'))
-                  if cargo in {'PRESIDENTE','GOVERNADOR'}:
-                      rows.append(row)
+
+          selected = {}
+          for src in files:
+              with open(src, 'r', encoding='latin1', errors='replace', newline='') as f:
+                  r = csv.DictReader(f, delimiter=';')
+                  for row in r:
+                      cargo = norm(row.get('DS_CARGO'))
+                      if cargo not in {'PRESIDENTE', 'GOVERNADOR'}:
+                          continue
+                      sq = (row.get('SQ_CANDIDATO') or '').strip()
+                      if sq:
+                          selected[sq] = row
+
+          rows = list(selected.values())
           if not rows:
               raise SystemExit('Nenhuma candidatura a Presidente/Governador encontrada')
-          fields=['SQ_CANDIDATO','SG_UF','DS_CARGO','NM_CANDIDATO','NM_URNA_CANDIDATO','NR_CANDIDATO','SG_PARTIDO','NM_PARTIDO','NM_COLIGACAO','DS_COMPOSICAO_COLIGACAO','DS_SITUACAO_CANDIDATURA']
+
+          rows.sort(key=lambda r: (0 if norm(r.get('DS_CARGO')) == 'PRESIDENTE' else 1, r.get('SG_UF',''), r.get('NM_URNA_CANDIDATO','')))
+          fields = ['SQ_CANDIDATO','SG_UF','DS_CARGO','NM_CANDIDATO','NM_URNA_CANDIDATO','NR_CANDIDATO','SG_PARTIDO','NM_PARTIDO','NM_COLIGACAO','DS_COMPOSICAO_COLIGACAO','DS_SITUACAO_CANDIDATURA']
+
           with open('saida/manifesto.csv','w',encoding='utf-8',newline='') as f:
-              w=csv.DictWriter(f, fieldnames=fields)
+              w = csv.DictWriter(f, fieldnames=fields)
               w.writeheader()
               for row in rows:
-                  w.writerow({k:row.get(k,'') for k in fields})
+                  w.writerow({k: row.get(k,'') for k in fields})
+
           with open('saida/manifesto.json','w',encoding='utf-8') as f:
-              json.dump([{k:row.get(k,'') for k in fields} for row in rows],f,ensure_ascii=False,indent=2)
-          print('Candidaturas selecionadas:',len(rows))
+              json.dump([{k: row.get(k,'') for k in fields} for row in rows], f, ensure_ascii=False, indent=2)
+
+          print('CSVs lidos:', len(files))
+          print('Candidaturas selecionadas:', len(rows))
+          print('Presidentes:', sum(1 for r in rows if norm(r.get('DS_CARGO')) == 'PRESIDENTE'))
+          print('Governadores:', sum(1 for r in rows if norm(r.get('DS_CARGO')) == 'GOVERNADOR'))
           PY
 
       - name: Baixar e extrair propostas oficiais de governo
@@ -83,7 +99,7 @@ jobs:
           done
           find saida/propostas -type f -printf '%p\n' | sort > saida/logs/arquivos_propostas.txt
 
-      - name: Baixar pacotes de fotos e preservar apenas Presidente/Governadores
+      - name: Baixar pacotes de fotos e preservar apenas Presidente e Governadores
         run: |
           set -euxo pipefail
           ufs=(BR AC AL AM AP BA CE DF ES GO MA MG MS MT PA PB PE PI PR RJ RN RO RR RS SC SE SP TO)
@@ -96,27 +112,29 @@ jobs:
               unzip -q -o "/tmp/fotos_${uf}.zip" -d /tmp/fotos_uf
               UF="$uf" python3 - <<'PY'
           import csv, os, glob, shutil
-          uf=os.environ['UF']
-          wanted=[]
-          with open('saida/manifesto.csv',encoding='utf-8',newline='') as f:
+          uf = os.environ['UF']
+          wanted = []
+          with open('saida/manifesto.csv', encoding='utf-8', newline='') as f:
               for r in csv.DictReader(f):
-                  if (uf=='BR' and r['DS_CARGO'].upper()=='PRESIDENTE') or (uf!='BR' and r['SG_UF']==uf and r['DS_CARGO'].upper()=='GOVERNADOR'):
+                  cargo = r['DS_CARGO'].upper()
+                  if (uf == 'BR' and cargo == 'PRESIDENTE') or (uf != 'BR' and r['SG_UF'] == uf and cargo == 'GOVERNADOR'):
                       wanted.append(r['SQ_CANDIDATO'])
-          all_files=glob.glob('/tmp/fotos_uf/**/*',recursive=True)
-          copied=0
+
+          all_files = [p for p in glob.glob('/tmp/fotos_uf/**/*', recursive=True) if os.path.isfile(p)]
+          copied = 0
           for sq in wanted:
-              matches=[p for p in all_files if os.path.isfile(p) and os.path.splitext(os.path.basename(p))[0]==sq]
+              matches = [p for p in all_files if os.path.splitext(os.path.basename(p))[0] == sq]
               if not matches:
-                  matches=[p for p in all_files if os.path.isfile(p) and sq in os.path.basename(p)]
+                  matches = [p for p in all_files if sq in os.path.basename(p)]
               if matches:
-                  src=matches[0]
-                  ext=os.path.splitext(src)[1].lower() or '.jpg'
-                  dst=f'saida/fotos/{uf}/{sq}{ext}'
-                  shutil.copy2(src,dst)
+                  src = matches[0]
+                  ext = os.path.splitext(src)[1].lower() or '.jpg'
+                  dst = f'saida/fotos/{uf}/{sq}{ext}'
+                  shutil.copy2(src, dst)
                   copied += 1
               else:
-                  print('FOTO NAO LOCALIZADA',uf,sq)
-          print(uf,'selecionados',len(wanted),'copiados',copied)
+                  print('FOTO NAO LOCALIZADA', uf, sq)
+          print(uf, 'selecionados', len(wanted), 'copiados', copied)
           PY
               rm -rf /tmp/fotos_uf "/tmp/fotos_${uf}.zip"
             else
@@ -129,14 +147,22 @@ jobs:
         run: |
           python3 - <<'PY'
           import csv, glob, os, json
-          with open('saida/manifesto.csv',encoding='utf-8') as f:
-              cand=list(csv.DictReader(f))
-          fotos=glob.glob('saida/fotos/**/*',recursive=True)
-          fotos={os.path.splitext(os.path.basename(p))[0]:p for p in fotos if os.path.isfile(p)}
-          pdfs=glob.glob('saida/propostas/**/*.pdf',recursive=True)
-          report={'candidaturas':len(cand),'fotos_oficiais_localizadas':sum(1 for r in cand if r['SQ_CANDIDATO'] in fotos),'pdfs_propostas_extraidos':len(pdfs),'sem_foto':[r for r in cand if r['SQ_CANDIDATO'] not in fotos]}
-          with open('saida/auditoria.json','w',encoding='utf-8') as f: json.dump(report,f,ensure_ascii=False,indent=2)
-          print(json.dumps(report,ensure_ascii=False,indent=2))
+          with open('saida/manifesto.csv', encoding='utf-8') as f:
+              cand = list(csv.DictReader(f))
+          fotos = glob.glob('saida/fotos/**/*', recursive=True)
+          fotos = {os.path.splitext(os.path.basename(p))[0]: p for p in fotos if os.path.isfile(p)}
+          pdfs = glob.glob('saida/propostas/**/*.pdf', recursive=True)
+          report = {
+              'candidaturas': len(cand),
+              'presidentes': sum(1 for r in cand if r['DS_CARGO'].upper() == 'PRESIDENTE'),
+              'governadores': sum(1 for r in cand if r['DS_CARGO'].upper() == 'GOVERNADOR'),
+              'fotos_oficiais_localizadas': sum(1 for r in cand if r['SQ_CANDIDATO'] in fotos),
+              'pdfs_propostas_extraidos': len(pdfs),
+              'sem_foto': [r for r in cand if r['SQ_CANDIDATO'] not in fotos]
+          }
+          with open('saida/auditoria.json','w',encoding='utf-8') as f:
+              json.dump(report, f, ensure_ascii=False, indent=2)
+          print(json.dumps(report, ensure_ascii=False, indent=2))
           PY
 
       - name: Publicar dados oficiais extraidos
