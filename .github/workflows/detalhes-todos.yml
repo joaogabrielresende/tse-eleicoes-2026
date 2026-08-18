@@ -1,0 +1,97 @@
+name: Consolidar detalhes DivulgaCand 2026
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/detalhes-todos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BASE: https://divulgacandcontas.tse.jus.br/divulga/rest/v1
+  ELEICAO: '20322002026'
+
+jobs:
+  detalhes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baixar cadastro e consultar detalhes
+        run: |
+          set -euxo pipefail
+          mkdir -p todos resultado
+          curl -fL --retry 5 --retry-all-errors https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand/consulta_cand_2026.zip -o /tmp/c.zip
+          unzip -q /tmp/c.zip -d /tmp/cand
+          python3 - <<'PY'
+          import csv, glob, json, os, time, urllib.request, urllib.error, unicodedata
+          base=os.environ['BASE']; eleicao=os.environ['ELEICAO']
+          def norm(s): return unicodedata.normalize('NFKD',s or '').encode('ascii','ignore').decode().upper().strip()
+          selected={}
+          for src in glob.glob('/tmp/cand/**/*.csv',recursive=True):
+              with open(src,encoding='latin1',errors='replace',newline='') as f:
+                  for r in csv.DictReader(f,delimiter=';'):
+                      if norm(r.get('DS_CARGO')) in {'PRESIDENTE','GOVERNADOR'} and r.get('SQ_CANDIDATO'):
+                          selected[r['SQ_CANDIDATO']]=r
+          rows=[]
+          for i,(sq,r) in enumerate(sorted(selected.items(),key=lambda kv:(kv[1].get('SG_UF',''),kv[1].get('NR_CANDIDATO',''),kv[0])),1):
+              uf=r['SG_UF']; url=f'{base}/candidatura/buscar/2026/{uf}/{eleicao}/candidato/{sq}'
+              item={'sq':sq,'uf':uf,'cargo':r.get('DS_CARGO'),'nome_urna_csv':r.get('NM_URNA_CANDIDATO'),'numero_csv':r.get('NR_CANDIDATO'),'partido_csv':r.get('SG_PARTIDO'),'csv':r,'url':url,'ok':False}
+              err=None
+              for attempt in range(4):
+                  try:
+                      req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+                      with urllib.request.urlopen(req,timeout=30) as resp:
+                          data=json.loads(resp.read().decode('utf-8'))
+                      item['ok']=True
+                      item['detail']=data
+                      break
+                  except Exception as e:
+                      err=str(e);time.sleep(0.8*(attempt+1))
+              if not item['ok']: item['error']=err
+              rows.append(item)
+              if i%20==0: print('consultados',i,'de',len(selected),flush=True)
+              time.sleep(0.12)
+          with open('todos/detalhes_todos.json','w',encoding='utf-8') as f: json.dump(rows,f,ensure_ascii=False,indent=2)
+          resumo=[]
+          for x in rows:
+              d=x.get('detail',{})
+              vices=d.get('vices') or []
+              resumo.append({
+                  'sq':x['sq'],'uf':x['uf'],'cargo':x['cargo'],'nome_urna':d.get('nomeUrna') or x['nome_urna_csv'],
+                  'numero':d.get('numero') or x['numero_csv'],'partido':(d.get('partido') or {}).get('sigla') or x['partido_csv'],
+                  'descricaoSituacao':d.get('descricaoSituacao'),'codigoSituacaoCandidato':d.get('codigoSituacaoCandidato'),
+                  'descricaoSituacaoCandidato':d.get('descricaoSituacaoCandidato'),'candidatoApto':d.get('candidatoApto'),'isCandidatoInapto':d.get('isCandidatoInapto'),
+                  'substituto':d.get('substituto'),'motivoSituacao':d.get('motivoSituacao'),'dataUltimaAtualizacao':d.get('dataUltimaAtualizacao'),
+                  'nomeColigacao':d.get('nomeColigacao'),'composicaoColigacao':d.get('composicaoColigacao'),
+                  'vices':[{'id':v.get('id'),'nomeUrna':v.get('nomeUrna'),'nomeCompleto':v.get('nomeCompleto'),'numero':v.get('numero'),'situacao':v.get('descricaoSituacao'),'partido':(v.get('partido') or {}).get('sigla')} for v in vices],
+                  'fotoUrl':d.get('fotoUrl'),'arquivos':d.get('arquivos') or [],'ok':x['ok']
+              })
+          with open('todos/resumo_todos.json','w',encoding='utf-8') as f:json.dump(resumo,f,ensure_ascii=False,indent=2)
+          print('total',len(rows),'ok',sum(1 for x in rows if x['ok']))
+          PY
+      - name: Publicar detalhes
+        id: up
+        uses: actions/upload-artifact@v4
+        with:
+          name: tse-2026-detalhes-divulgacand
+          path: todos/
+          retention-days: 7
+      - name: Registrar ponte
+        env:
+          ARTIFACT_ID: ${{ steps.up.outputs.artifact-id }}
+          RUN_ID: ${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json,os
+          json.dump({'run_id':int(os.environ['RUN_ID']),'artifact_id':int(os.environ['ARTIFACT_ID']),'head_sha':os.environ['HEAD_SHA']},open('resultado/detalhes-todos-latest.json','w'),indent=2)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add resultado/detalhes-todos-latest.json
+          git commit -m "Atualiza detalhes DivulgaCand 2026" || true
+          git push
