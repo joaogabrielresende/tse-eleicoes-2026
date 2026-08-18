@@ -1,0 +1,66 @@
+name: OCR planos escaneados 2026
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ocr-planos-escaneados.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preparar OCR
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils tesseract-ocr tesseract-ocr-por unzip
+          mkdir -p ocr/{BA,PE,RO,SC} resultado
+      - name: Baixar PDFs oficiais e executar OCR
+        run: |
+          set -euxo pipefail
+          declare -A IDS
+          IDS[BA]=50002544692
+          IDS[PE]=170002537227
+          IDS[RO]=220002551251
+          IDS[SC]=240002548628
+          for uf in BA PE RO SC; do
+            curl -fL --retry 5 --retry-all-errors "https://cdn.tse.jus.br/estatistica/sead/odsele/proposta_governo/proposta_governo_2026_${uf}.zip" -o "/tmp/${uf}.zip"
+            unzip -q "/tmp/${uf}.zip" -d "/tmp/${uf}"
+            pdf=$(find "/tmp/${uf}" -type f -iname "*${IDS[$uf]}*.pdf" | head -1)
+            test -n "$pdf"
+            mkdir -p "ocr/$uf/images"
+            pdftoppm -jpeg -jpegopt quality=70 -r 72 "$pdf" "ocr/$uf/images/page" >/dev/null 2>&1
+            find "ocr/$uf/images" -name 'page-*.jpg' | sort -V > "ocr/$uf/list.txt"
+            tesseract "ocr/$uf/list.txt" "ocr/$uf/texto" -l por --psm 11
+            rm -rf "ocr/$uf/images"
+            echo "$pdf" > "ocr/$uf/origem.txt"
+          done
+      - name: Publicar OCR
+        id: up
+        uses: actions/upload-artifact@v4
+        with:
+          name: tse-2026-ocr-planos-escaneados
+          path: ocr/
+          retention-days: 7
+      - name: Registrar ponte
+        env:
+          ARTIFACT_ID: ${{ steps.up.outputs.artifact-id }}
+          RUN_ID: ${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json,os
+          json.dump({'run_id':int(os.environ['RUN_ID']),'artifact_id':int(os.environ['ARTIFACT_ID']),'head_sha':os.environ['HEAD_SHA']},open('resultado/ocr-latest.json','w'),indent=2)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add resultado/ocr-latest.json
+          git commit -m "Atualiza OCR planos escaneados" || true
+          git push
