@@ -1,0 +1,29 @@
+{
+  "run_id": 32140364693,
+  "run_attempt": 1,
+  "artifact_id": 9325775030,
+  "artifact_url": "https://github.com/joaogabrielresende/tse-eleicoes-2026/actions/runs/32140364693/artifacts/9325775030",
+  "head_sha": "430972153ca802e7e3a01988da53f6586e7a1d46",
+  "audit": {
+    "candidaturas": 209,
+    "presidentes": 13,
+    "governadores": 196,
+    "fotos_oficiais_localizadas": 208,
+    "pdfs_propostas_extraidos": 248,
+    "sem_foto": [
+      {
+        "SQ_CANDIDATO": "60002553922",
+        "SG_UF": "CE",
+        "DS_CARGO": "GOVERNADOR",
+        "NM_CANDIDATO": "VERA LUCIA DA SILVA",
+        "NM_URNA_CANDIDATO": "VERA LÚCIA",
+        "NR_CANDIDATO": "30",
+        "SG_PARTIDO": "NOVO",
+        "NM_PARTIDO": "PARTIDO NOVO",
+        "NM_COLIGACAO": "PARTIDO ISOLADO",
+        "DS_COMPOSICAO_COLIGACAO": "NOVO",
+        "DS_SITUACAO_CANDIDATURA": "#NE"
+      }
+    ]
+  }
+}
