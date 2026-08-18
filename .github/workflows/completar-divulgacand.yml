@@ -1,0 +1,133 @@
+name: Completar faltantes via DivulgaCand
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/completar-divulgacand.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BASE: https://divulgacandcontas.tse.jus.br/divulga/rest/v1
+  ELEICAO: '20322002026'
+  ANO: '2026'
+
+jobs:
+  completar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Consultar candidaturas faltantes
+        run: |
+          set -euxo pipefail
+          mkdir -p faltantes/detalhes faltantes/planos faltantes/fotos resultado
+          cat > /tmp/faltantes.tsv <<'EOF'
+          BR	280002553884	PABLO MARÇAL
+          CE	60002553922	VERA LÚCIA
+          MG	130002544411	BEN MENDES
+          PB	150002551911	PEDRO COUTINHO
+          RJ	190002543380	EDUARDO PAES
+          RJ	190002550196	GAROTINHO
+          RS	210002541367	REJANE DE OLIVEIRA
+          SP	250002548080	POLICIAL EDJANE
+          EOF
+
+          python3 - <<'PY'
+          import json, os, subprocess, urllib.request, urllib.error
+
+          base=os.environ['BASE']; eleicao=os.environ['ELEICAO']; ano=os.environ['ANO']
+          items=[]
+          for line in open('/tmp/faltantes.tsv',encoding='utf-8'):
+              uf,sq,nome=line.rstrip('\n').split('\t',2)
+              url=f'{base}/candidatura/buscar/{ano}/{uf}/{eleicao}/candidato/{sq}'
+              rec={'uf':uf,'sq':sq,'nome':nome,'detail_url':url,'detail_ok':False,'arquivos':[],'fotoUrl':None,'downloads':[]}
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=30) as r:
+                      raw=r.read()
+                  data=json.loads(raw.decode('utf-8'))
+                  rec['detail_ok']=True
+                  rec['fotoUrl']=data.get('fotoUrl')
+                  rec['arquivos']=data.get('arquivos') or []
+                  with open(f'faltantes/detalhes/{uf}_{sq}.json','w',encoding='utf-8') as f:
+                      json.dump(data,f,ensure_ascii=False,indent=2)
+
+                  for i,a in enumerate(rec['arquivos'],1):
+                      aid=a.get('idArquivo') or a.get('id')
+                      direct=a.get('url')
+                      nomearq=(a.get('nome') or f'arquivo_{i}').replace('/','_')
+                      candidates=[]
+                      if direct:
+                          if str(direct).startswith('http'): candidates.append(str(direct))
+                          else: candidates.append('https://divulgacandcontas.tse.jus.br'+str(direct))
+                      if aid:
+                          candidates.append(f'https://divulgacandcontas.tse.jus.br/divulga/rest/arquivo/doc/{aid}')
+                      ok=None
+                      for u in candidates:
+                          try:
+                              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'})
+                              with urllib.request.urlopen(req,timeout=30) as rr:
+                                  blob=rr.read(); ct=rr.headers.get('content-type','')
+                              ext='.pdf' if blob[:4]==b'%PDF' or 'pdf' in ct.lower() else '.bin'
+                              out=f'faltantes/planos/{uf}_{sq}_{i}{ext}'
+                              open(out,'wb').write(blob)
+                              ok={'url':u,'path':out,'bytes':len(blob),'content_type':ct}
+                              break
+                          except Exception as e:
+                              last=str(e)
+                      if ok: rec['downloads'].append(ok)
+
+                  if rec['fotoUrl']:
+                      u=rec['fotoUrl']
+                      if not str(u).startswith('http'):
+                          u='https://divulgacandcontas.tse.jus.br'+str(u)
+                      try:
+                          req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'})
+                          with urllib.request.urlopen(req,timeout=30) as rr:
+                              blob=rr.read(); ct=rr.headers.get('content-type','')
+                          ext='.jpg' if 'jpeg' in ct.lower() or 'jpg' in ct.lower() else '.png' if 'png' in ct.lower() else '.img'
+                          out=f'faltantes/fotos/{uf}_{sq}{ext}'
+                          open(out,'wb').write(blob)
+                          rec['foto_download']={'url':u,'path':out,'bytes':len(blob),'content_type':ct}
+                      except Exception as e:
+                          rec['foto_error']=str(e)
+              except Exception as e:
+                  rec['detail_error']=str(e)
+              items.append(rec)
+
+          with open('faltantes/resultado.json','w',encoding='utf-8') as f:
+              json.dump(items,f,ensure_ascii=False,indent=2)
+          print(json.dumps(items,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Publicar artefato faltantes
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: tse-2026-faltantes-divulgacand
+          path: faltantes/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Registrar ponte para coleta
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          RUN_ID: ${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          r={'run_id':int(os.environ['RUN_ID']),'artifact_id':int(os.environ['ARTIFACT_ID']),'artifact_url':os.environ.get('ARTIFACT_URL',''),'head_sha':os.environ['HEAD_SHA']}
+          json.dump(r,open('resultado/faltantes-latest.json','w'),ensure_ascii=False,indent=2)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add resultado/faltantes-latest.json
+          git commit -m "Atualiza resultado DivulgaCand faltantes" || true
+          git push
