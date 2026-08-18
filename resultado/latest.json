@@ -1,9 +1,9 @@
 {
-  "run_id": 32140364693,
+  "run_id": 32142737682,
   "run_attempt": 1,
-  "artifact_id": 9325775030,
-  "artifact_url": "https://github.com/joaogabrielresende/tse-eleicoes-2026/actions/runs/32140364693/artifacts/9325775030",
-  "head_sha": "430972153ca802e7e3a01988da53f6586e7a1d46",
+  "artifact_id": 9326552695,
+  "artifact_url": "https://github.com/joaogabrielresende/tse-eleicoes-2026/actions/runs/32142737682/artifacts/9326552695",
+  "head_sha": "38f5fe1176be894061d46c823f5dd645bd30e37d",
   "audit": {
     "candidaturas": 209,
     "presidentes": 13,
