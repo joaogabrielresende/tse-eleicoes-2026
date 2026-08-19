@@ -1,0 +1,67 @@
+name: Gerar mapa nivel A
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gerar-mapa-nivel-a.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mapa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preparar e gerar mapa
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq librsvg2-bin
+          curl -fL --retry 5 https://raw.githubusercontent.com/LucasBassetti/mapa-brasil-svg/master/index.html -o /tmp/mapa.html
+          python3 - <<'PY'
+          import re
+          html=open('/tmp/mapa.html',encoding='utf-8').read()
+          svg=re.search(r'(<svg[^>]*id="svg-map".*?</svg>)', html, re.S).group(1)
+          # cores ARAYARA: vermelho para nivel A; cinza-claro para demais UFs
+          A={'Amapá','Roraima','Maranhão','Rio Grande do Norte','Pernambuco','Sergipe','Espírito Santo','Rio de Janeiro','Mato Grosso do Sul'}
+          def repl(m):
+              block=m.group(0)
+              name=m.group(1)
+              fill='#ed1639' if name in A else '#e5e5e5'
+              block=re.sub(r'<path ', f'<path fill="{fill}" ', block)
+              block=re.sub(r'<path class="circle" ', f'<path class="circle" fill="{fill}" ', block)
+              # make labels dark on gray and white on A
+              tc='#ffffff' if name in A else '#555555'
+              block=re.sub(r'fill="#FFFFFF"', f'fill="{tc}"', block)
+              return block
+          svg=re.sub(r'<a [^>]*name="([^"]+)"[^>]*>.*?</a>', repl, svg, flags=re.S)
+          svg=svg.replace('width="450px" height="460px"','width="900px" height="920px"')
+          open('/tmp/mapa.svg','w',encoding='utf-8').write(svg)
+          PY
+          mkdir -p resultado
+          rsvg-convert -w 1200 -h 1227 /tmp/mapa.svg -o resultado/mapa_nivel_a.png
+          cp /tmp/mapa.svg resultado/mapa_nivel_a.svg
+      - name: Publicar artefato
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapa-nivel-a
+          path: resultado/
+          retention-days: 7
+      - name: Registrar resultado
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json,os
+          json.dump({'run_id':int(os.environ['RUN_ID']),'artifact_id':int(os.environ['ARTIFACT_ID'])},open('resultado/mapa-latest.json','w'),indent=2)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add resultado/mapa-latest.json
+          git commit -m "Atualiza resultado do mapa nivel A" || true
+          git push
